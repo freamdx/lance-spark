@@ -114,7 +114,6 @@ public class LanceBatchWrite implements BatchWrite {
       StagedCommit stagedCommit,
       ShardingSpec shardingSpec,
       Map<String, BlobSourceContext> blobSourceContexts) {
-    this.schema = schema;
     this.overwrite = overwrite;
     this.initialStorageOptions = initialStorageOptions;
     this.namespaceImpl = namespaceImpl;
@@ -126,12 +125,15 @@ public class LanceBatchWrite implements BatchWrite {
     this.blobSourceContexts =
         blobSourceContexts == null ? java.util.Collections.emptyMap() : blobSourceContexts;
 
-    // For staged operations, the dataset is managed by StagedCommit.
-    // For non-staged operations, pin the dataset version for OCC.
+    // A staged write creates or replaces the table, so its columns take Spark's types and the
+    // dataset is managed by StagedCommit. Any other write goes into the existing dataset: pin its
+    // version for OCC and keep its unsigned integer columns unsigned.
     if (stagedCommit != null) {
+      this.schema = schema;
       this.writeOptions = writeOptions;
     } else {
       try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
+        this.schema = LanceArrowUtils.markUnsignedForWrite(schema, ds.getSchema());
         this.writeOptions = writeOptions.withRef(LanceRef.ofMain(ds.version()));
         logger.debug("Resolved dataset ref for batch write: {}", this.writeOptions.getRef());
       }
@@ -261,8 +263,9 @@ public class LanceBatchWrite implements BatchWrite {
 
   /**
    * Returns the Arrow schema that {@link #commit(WriterCommitMessage[])} commits when {@link
-   * #isOverwrite()} is true. It is derived from the write's Spark schema and resolved options, such
-   * as {@code use_large_var_types}, which an external writer cannot see otherwise.
+   * #isOverwrite()} is true. It is derived from the write's Spark schema, the unsigned integer
+   * types of an existing table's columns, and resolved options, such as {@code
+   * use_large_var_types}, which an external writer cannot see otherwise.
    */
   @Evolving
   public Schema getCommitSchema() {
@@ -308,12 +311,17 @@ public class LanceBatchWrite implements BatchWrite {
    * <p>Write the fragments with the parameters of {@link #getFragmentWriteSpec()}. When {@link
    * #isOverwrite()} is true, do not pass the table's schema to {@code
    * WriteFragmentBuilder.schema(...)}, and give the stream the column types of {@link
-   * #getCommitSchema()}. Timestamps must use the same unit, and strings and binaries the same
-   * offset width. The stream may leave out a timestamp's time zone.
+   * #getCommitSchema()}. Timestamps must use the same unit, integers the same width and signedness,
+   * and strings and binaries the same offset width. The stream may leave out a timestamp's time
+   * zone.
    *
    * <p>{@code commit} does not validate these fragments: not their file format version, field ids
    * or column types. Fragments written in the wrong mode, or with the wrong schema or types, can
    * commit and then read back as nulls or wrong values, or leave the table unreadable.
+   *
+   * <p>Whether or not {@link #isOverwrite()} is true, reject a value outside an unsigned integer
+   * column's range, as {@link LanceDataWriter} does: narrowing it stores a different value, which
+   * Lance accepts.
    *
    * @param fragments uncommitted fragments produced by a task
    * @return a message accepted by {@link #commit(WriterCommitMessage[])}
