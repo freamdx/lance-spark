@@ -170,6 +170,11 @@ public class LanceBatchWrite implements BatchWrite {
 
     Schema arrowSchema = getCommitSchema();
 
+    // Lance-Java rejects empty fragments, so empty appends are a noop; empty overwrites truncate.
+    if (fragments.isEmpty() && !isOverwrite()) {
+      return;
+    }
+
     // Boxed: null means unset (inherit in lance-core); see LanceSparkWriteOptions.
     final Boolean enableStableRowIds = writeOptions.getEnableStableRowIds();
 

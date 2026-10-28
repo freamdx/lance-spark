@@ -70,6 +70,60 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 public class LanceBatchWriteTest {
   @TempDir static Path tempDir;
 
+  /** An empty immediate-commit write is a noop: no new version and no rows. */
+  @Test
+  public void testCommitEmptyFragmentsIsNoop(TestInfo testInfo) throws Exception {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
+      Field field = new Field("column1", FieldType.nullable(new ArrowType.Int(32, true)), null);
+      Schema schema = new Schema(Collections.singletonList(field));
+      Dataset.create(allocator, datasetUri, schema, new WriteParams.Builder().build()).close();
+
+      long versionBefore;
+      try (Dataset dataset = Dataset.open(datasetUri, LanceRuntime.allocator())) {
+        versionBefore = dataset.version();
+      }
+
+      LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(datasetUri);
+      StructType sparkSchema = LanceArrowUtils.fromArrowSchema(schema);
+      LanceBatchWrite lanceBatchWrite = newBatchWrite(sparkSchema, writeOptions, false, null);
+      lanceBatchWrite.commit(new WriterCommitMessage[0]);
+
+      try (Dataset dataset = Dataset.open(datasetUri, LanceRuntime.allocator())) {
+        assertEquals(versionBefore, dataset.version());
+        assertEquals(0, dataset.countRows());
+      }
+    }
+  }
+
+  /** An empty overwrite truncates the table instead of leaving stale rows. */
+  @Test
+  public void testCommitEmptyOverwriteTruncatesTable(TestInfo testInfo) throws Exception {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
+      Field field = new Field("column1", FieldType.nullable(new ArrowType.Int(32, true)), null);
+      Schema schema = new Schema(Collections.singletonList(field));
+      StructType sparkSchema = LanceArrowUtils.fromArrowSchema(schema);
+      LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(datasetUri);
+
+      Dataset.create(allocator, datasetUri, schema, new WriteParams.Builder().build()).close();
+      LanceBatchWrite seedWriter = newBatchWrite(sparkSchema, writeOptions, false, null);
+      seedWriter.commit(new WriterCommitMessage[] {writeRows(seedWriter, sparkSchema, 10, 0)});
+      try (Dataset dataset = Dataset.open(datasetUri, LanceRuntime.allocator())) {
+        assertEquals(10, dataset.countRows());
+      }
+
+      LanceBatchWrite overwriteWriter = newBatchWrite(sparkSchema, writeOptions, true, null);
+      overwriteWriter.commit(new WriterCommitMessage[0]);
+
+      try (Dataset dataset = Dataset.open(datasetUri, LanceRuntime.allocator())) {
+        assertEquals(0, dataset.countRows());
+      }
+    }
+  }
+
   @Test
   public void testTaskCommitRejectsNullFragments() {
     NullPointerException error =
